@@ -16,6 +16,29 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
+const cleanupRegistry = new Map();
+let cleanupNeeded = false;
+
+function registerCleanup(key, handler) {
+    if (!handler || cleanupRegistry.has(key)) {
+        return;
+    }
+    cleanupRegistry.set(key, handler);
+    cleanupNeeded = true;
+}
+
+async function cleanupResources() {
+    for (const [key, handler] of cleanupRegistry.entries()) {
+        try {
+            await handler();
+        } catch (error) {
+            console.warn(`⚠️ Cleanup handler '${key}' failed:`, error?.message || error);
+        }
+    }
+    cleanupRegistry.clear();
+    cleanupNeeded = false;
+}
+
 // Get version from package.json
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1412,8 +1435,13 @@ async function handleHook(args) {
 
 async function handleNeural(args) {
     const { neuralCLI } = await import('../src/neural.js');
+    registerCleanup('neural', async () => {
+        if (typeof neuralCLI.cleanup === 'function') {
+            await neuralCLI.cleanup();
+        }
+    });
     const subcommand = args[0] || 'help';
-    
+
     try {
         switch (subcommand) {
             case 'status':
@@ -1443,7 +1471,7 @@ Examples:
         }
     } catch (error) {
         console.error('❌ Neural command error:', error.message);
-        process.exit(1);
+        throw error;
     }
 }
 
@@ -1590,15 +1618,15 @@ For detailed documentation, check .claude/commands/ after running init --claude
 
 async function main() {
     const args = process.argv.slice(2);
-    
+    let exitCode = 0;
+
     // Handle --version flag
     if (args.includes('--version') || args.includes('-v')) {
         const version = await getVersion();
         console.log(version);
-        process.exit(0);
         return;
     }
-    
+
     const command = args[0] || 'help';
 
     try {
@@ -1664,20 +1692,26 @@ async function main() {
                 console.log('\n✅ Security Status: All vulnerabilities from Issue #107 resolved');
                 console.log('🚀 Production Status: Ready for deployment');
                 console.log('🔥 TIMEOUT STATUS: ALL TIMEOUT MECHANISMS COMPLETELY REMOVED');
-                process.exit(0);
-                return;
+                break;
             case 'help':
             default:
                 await showHelp();
-                process.exit(0);
-                return;
+                break;
         }
     } catch (error) {
+        exitCode = 1;
         console.error('❌ Error:', error.message);
         if (process.argv.includes('--debug')) {
             console.error(error.stack);
         }
-        process.exit(1);
+    } finally {
+        if (cleanupNeeded) {
+            await cleanupResources();
+        }
+    }
+
+    if (exitCode !== 0) {
+        process.exit(exitCode);
     }
 }
 
